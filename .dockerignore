@@ -5,6 +5,7 @@ logs
 # Sensitive / env files
 .env*
 *.env
+.venv/
 
 # Build outputs
 dist

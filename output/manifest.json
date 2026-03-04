@@ -1,0 +1,44 @@
+{
+  "version": "1.2.3",
+  "source": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/input/conversations.json",
+  "generated_at_utc": "2026-03-04T09:37:52.860087Z",
+  "conversation_count_total": 3,
+  "conversation_count_processed": 3,
+  "outputs": {
+    "all_conversations_json": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/all_conversations.json",
+    "conversations_dir": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations",
+    "all_conversations_md": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/all_conversations.md"
+  },
+  "conversations": [
+    {
+      "index": 1,
+      "title": "Vault PKI rotation experiment",
+      "create_time_utc": "2024-02-27T02:13:20Z",
+      "update_time_utc": "2024-02-27T02:21:40Z",
+      "message_count": 3,
+      "folder": "2024-02-27_Vault PKI rotation experiment",
+      "json_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-27_Vault PKI rotation experiment/conversation.json",
+      "md_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-27_Vault PKI rotation experiment/conversation.md"
+    },
+    {
+      "index": 2,
+      "title": "Terraform run tf logo idea",
+      "create_time_utc": "2024-02-28T06:00:00Z",
+      "update_time_utc": "2024-02-28T06:05:00Z",
+      "message_count": 3,
+      "folder": "2024-02-28_Terraform run tf logo idea",
+      "json_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-28_Terraform run tf logo idea/conversation.json",
+      "md_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-28_Terraform run tf logo idea/conversation.md"
+    },
+    {
+      "index": 3,
+      "title": "Boundary worker configuration",
+      "create_time_utc": "2024-02-29T09:46:40Z",
+      "update_time_utc": "2024-02-29T09:50:00Z",
+      "message_count": 2,
+      "folder": "2024-02-29_Boundary worker configuration",
+      "json_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-29_Boundary worker configuration/conversation.json",
+      "md_path": "/Users/raymon.epping/Documents/VSC/Personal/parse_openai/output/conversations/2024-02-29_Boundary worker configuration/conversation.md"
+    }
+  ]
+}

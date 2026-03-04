@@ -1,0 +1,59 @@
+{
+  "title": "Vault PKI rotation experiment",
+  "create_time": 1709000000,
+  "update_time": 1709000500,
+  "mapping": {
+    "msg1": {
+      "id": "msg1",
+      "parent": null,
+      "children": [
+        "msg2"
+      ],
+      "message": {
+        "author": {
+          "role": "user"
+        },
+        "create_time": 1709000001,
+        "content": {
+          "parts": [
+            "How does Vault PKI certificate rotation work?"
+          ]
+        }
+      }
+    },
+    "msg2": {
+      "id": "msg2",
+      "parent": "msg1",
+      "children": [
+        "msg3"
+      ],
+      "message": {
+        "author": {
+          "role": "assistant"
+        },
+        "create_time": 1709000005,
+        "content": {
+          "parts": [
+            "Vault PKI issues certificates with a TTL. When the certificate approaches expiration, a new one can be issued automatically via Vault Agent or through API calls."
+          ]
+        }
+      }
+    },
+    "msg3": {
+      "id": "msg3",
+      "parent": "msg2",
+      "children": [],
+      "message": {
+        "author": {
+          "role": "user"
+        },
+        "create_time": 1709000010,
+        "content": {
+          "parts": [
+            "Can you show a CLI example?"
+          ]
+        }
+      }
+    }
+  }
+}

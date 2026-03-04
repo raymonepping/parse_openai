@@ -1,0 +1,213 @@
+[
+  {
+    "title": "Vault PKI rotation experiment",
+    "create_time": 1709000000,
+    "update_time": 1709000500,
+    "mapping": {
+      "msg1": {
+        "id": "msg1",
+        "parent": null,
+        "children": [
+          "msg2"
+        ],
+        "message": {
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1709000001,
+          "content": {
+            "parts": [
+              "How does Vault PKI certificate rotation work?"
+            ]
+          }
+        }
+      },
+      "msg2": {
+        "id": "msg2",
+        "parent": "msg1",
+        "children": [
+          "msg3"
+        ],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1709000005,
+          "content": {
+            "parts": [
+              "Vault PKI issues certificates with a TTL. When the certificate approaches expiration, a new one can be issued automatically via Vault Agent or through API calls."
+            ]
+          }
+        }
+      },
+      "msg3": {
+        "id": "msg3",
+        "parent": "msg2",
+        "children": [],
+        "message": {
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1709000010,
+          "content": {
+            "parts": [
+              "Can you show a CLI example?"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "title": "Terraform run tf logo idea",
+    "create_time": 1709100000,
+    "update_time": 1709100300,
+    "mapping": {
+      "a1": {
+        "id": "a1",
+        "parent": null,
+        "children": [
+          "a2"
+        ],
+        "message": {
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1709100001,
+          "content": {
+            "parts": [
+              "I want a shirt with RUN .TF similar to RUN DMC."
+            ]
+          }
+        }
+      },
+      "a2": {
+        "id": "a2",
+        "parent": "a1",
+        "children": [
+          "a3"
+        ],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1709100005,
+          "content": {
+            "parts": [
+              "That would work nicely with a Terraform-style block theme.",
+              "Example:",
+              "```",
+              "████████",
+              "  RUN",
+              "  .TF",
+              "████████",
+              "```"
+            ]
+          }
+        }
+      },
+      "a3": {
+        "id": "a3",
+        "parent": "a2",
+        "children": [],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1709100010,
+          "content": {
+            "parts": [
+              "You could also place the Terraform logo colors behind the block."
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "title": "Boundary worker configuration",
+    "create_time": 1709200000,
+    "update_time": 1709200200,
+    "mapping": {
+      "b1": {
+        "id": "b1",
+        "parent": null,
+        "children": [
+          "b2"
+        ],
+        "message": {
+          "author": {
+            "role": "system"
+          },
+          "create_time": 1709200000,
+          "content": {
+            "parts": [
+              "You are ChatGPT, a helpful assistant."
+            ]
+          }
+        }
+      },
+      "b2": {
+        "id": "b2",
+        "parent": "b1",
+        "children": [
+          "b3",
+          "b4"
+        ],
+        "message": {
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1709200005,
+          "content": {
+            "parts": [
+              "How do I configure a Boundary worker locally?"
+            ]
+          }
+        }
+      },
+      "b3": {
+        "id": "b3",
+        "parent": "b2",
+        "children": [],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1709200010,
+          "content": {
+            "parts": [
+              "A Boundary worker configuration might look like this:",
+              "```hcl",
+              "listener \"tcp\" {",
+              "  address = \"0.0.0.0:9202\"",
+              "  purpose = \"proxy\"",
+              "}",
+              "",
+              "worker {",
+              "  auth_storage_path = \"/boundary/worker\"",
+              "}",
+              "```"
+            ]
+          }
+        }
+      },
+      "b4": {
+        "id": "b4",
+        "parent": "b2",
+        "children": [],
+        "message": {
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1709200015,
+          "content": {
+            "parts": [
+              "Alternatively you can run a worker container and mount the config."
+            ]
+          }
+        }
+      }
+    }
+  }
+]

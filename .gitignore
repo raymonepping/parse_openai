@@ -9,6 +9,7 @@ Thumbs.db
 *.bak
 *.swp
 *.pid
+.venv/
 git_commit.sh
 FOLDER_TREE.md
 
