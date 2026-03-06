@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-chatgpt_export_unpacker.py  v1.2.3
+chatgpt_export_unpacker.py  v1.4.0
 
 Turns a ChatGPT data export folder into:
-- One big JSON  "as-is"
+- One big JSON "as-is"
   -> all_conversations.json
 - One big Markdown "as-is" (optional, default on)
   -> all_conversations.md
@@ -14,20 +14,37 @@ Turns a ChatGPT data export folder into:
 - Summary manifest with hashes
   -> manifest.json
 
-Zero external dependencies (stdlib only).
-Requires Python 3.10+.
+Large-export friendly:
+- Handles both single conversations.json and split conversations-NNN.json exports
+- Can stream conversations.json (no full in-memory load)
+- Writes all_conversations.json as a streamed JSON array
+- Shows input size and progress
+- Optional ijson support (if installed) for simpler streaming
+
+Dependencies:
+- Default: stdlib only (Python 3.10+)
+- Optional: ijson (recommended for huge exports)
+    pip install ijson
 
 Usage:
   python3 chatgpt_export_unpacker.py \
-    --input ~/Downloads/chatgpt-export --output ./archive --hash
+    --input ~/Downloads/chatgpt-export --output ./archive --hash --stats
 
   python3 chatgpt_export_unpacker.py \
-    --input ~/Downloads/chatgpt-export/conversations.json --output ./archive
+    --input ~/Downloads/chatgpt-export/conversations.json --output ./archive \
+    --stream --progress-every 100
 
 Options:
-  --stats        Print fun stats after processing
-  --no-markdown  Skip all Markdown outputs (faster, smaller)
+  --stats                 Print fun stats after processing
+  --no-markdown           Skip all Markdown outputs (faster, smaller)
+  --stream                Force streaming mode
+  --prefer-ijson          Prefer ijson when streaming (falls back to stdlib)
+  --stream-threshold-mb   Auto-enable streaming above this size (default: 200)
+  --progress-every        Progress log interval (default: 25)
+  --limit N               Alias for --max-conversations N
 """
+
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -42,10 +59,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Iterable
+
+# -- optional dependency ------------------------------------------------------
+try:
+    import ijson  # type: ignore
+except ImportError:  # pragma: no cover
+    ijson = None  # type: ignore
 
 # -- version ------------------------------------------------------------------
-__version__ = "1.2.3"
+__version__ = "1.4.0"
 MIN_PYTHON = (3, 10)
 
 # -- logging ------------------------------------------------------------------
@@ -130,6 +153,135 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
+def file_size_mb(path: Path) -> float:
+    """Return file size in MB."""
+    return path.stat().st_size / (1024.0 * 1024.0)
+
+
+def total_size_mb(paths: list[Path]) -> float:
+    """Return combined file size in MB for a list of paths."""
+    total = sum(p.stat().st_size for p in paths if p.exists())
+    return total / (1024.0 * 1024.0)
+
+
+# -- optional ijson streaming -------------------------------------------------
+def _try_stream_with_ijson(path: Path) -> Iterable[dict[str, Any]] | None:
+    """
+    Try to stream a top-level JSON array using ijson if available.
+    Returns an iterable or None if ijson is not installed.
+    """
+    if ijson is None:
+        return None
+
+    def _iter() -> Generator[dict[str, Any], None, None]:
+        with path.open("rb") as fh:
+            for convo in ijson.items(fh, "item"):
+                if isinstance(convo, dict):
+                    yield convo
+
+    return _iter()
+
+
+# -- streaming JSON array reader (stdlib-only) --------------------------------
+def stream_json_array(
+    path: Path, chunk_size: int = 1024 * 1024
+) -> Generator[Any, None, None]:
+    """
+    Stream a top-level JSON array from disk without loading it into RAM.
+
+    Assumes the file is: [ <obj>, <obj>, ... ]
+    Uses json.JSONDecoder().raw_decode incrementally.
+
+    Notes:
+    - Uses encoding="utf-8-sig" to tolerate BOM.
+    - Keeps only a rolling buffer in memory.
+    """
+    decoder = json.JSONDecoder()
+
+    with path.open("r", encoding="utf-8-sig") as fh:
+        buf = ""
+        idx = 0
+
+        def refill() -> bool:
+            nonlocal buf, idx
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                return False
+            if idx > 0:
+                buf = buf[idx:]
+                idx = 0
+            buf += chunk
+            return True
+
+        if not refill():
+            raise ValueError("Empty JSON file.")
+
+        while True:
+            while idx < len(buf) and buf[idx].isspace():
+                idx += 1
+            if idx < len(buf):
+                break
+            if not refill():
+                raise ValueError("Unexpected EOF while looking for '['.")
+
+        if buf[idx] != "[":
+            raise ValueError(
+                "Expected a top-level JSON array (starting with '[')."
+            )
+        idx += 1
+
+        while True:
+            while True:
+                while idx < len(buf) and buf[idx].isspace():
+                    idx += 1
+                if idx < len(buf) and buf[idx] == ",":
+                    idx += 1
+                    continue
+                if idx < len(buf):
+                    break
+                if not refill():
+                    raise ValueError("Unexpected EOF while scanning array.")
+
+            if buf[idx] == "]":
+                break
+
+            while True:
+                try:
+                    item, next_idx = decoder.raw_decode(buf, idx)
+                    idx = next_idx
+                    yield item
+                    break
+                except json.JSONDecodeError:
+                    if not refill():
+                        raise ValueError(
+                            "Unexpected EOF while decoding JSON item."
+                        ) from None
+
+
+def count_json_array_items(path: Path) -> int:
+    """Count items in a top-level JSON array using streaming (stdlib parser)."""
+    return sum(1 for _ in stream_json_array(path))
+
+
+def chain_json_files(
+    paths: list[Path],
+    use_ijson: bool,
+) -> Generator[dict[str, Any], None, None]:
+    """
+    Yield all conversation dicts from an ordered list of JSON array files.
+    Each file is a top-level JSON array.  Files are processed in sequence.
+    """
+    for path in paths:
+        log.info("Reading shard: %s", path.name)
+        if use_ijson and ijson is not None:
+            with path.open("rb") as fh:
+                for item in ijson.items(fh, "item"):
+                    if isinstance(item, dict):
+                        yield item
+        else:
+            yield from stream_json_array(path)
+
+
 # -- data model ---------------------------------------------------------------
 @dataclass(frozen=True)
 class MessageRecord:
@@ -210,13 +362,37 @@ class ConversationContext:
 class ArchiveBuildConfig:
     """Configuration snapshot used to build manifest and outputs."""
 
-    conv_json_path: Path
+    conv_json_paths: list[Path]  # one or more source shard files
     output_dir: Path
     now_utc: str
     total_conversations: int
     processed_conversations: int
     big_json_out: Path
     big_md_out: Path | None
+
+    @property
+    def conv_json_path(self) -> Path:
+        """Return the first source path for single-file backwards compatibility."""
+        return self.conv_json_paths[0]
+
+    @property
+    def sources_label(self) -> str:
+        """Human-readable source description for logs and manifests."""
+        if len(self.conv_json_paths) == 1:
+            return str(self.conv_json_paths[0])
+        parent = self.conv_json_paths[0].parent
+        return f"{parent} ({len(self.conv_json_paths)} shards)"
+
+
+@dataclass(frozen=True)
+class StreamConfig:
+    """Streaming and progress settings."""
+
+    force_stream: bool
+    prefer_ijson: bool
+    threshold_mb: int
+    progress_every: int
+    max_conversations: int | None
 
 
 def extract_message_text(message_obj: dict[str, Any]) -> str:
@@ -249,9 +425,7 @@ def _child_score(node: dict[str, Any]) -> tuple[float, str]:
 def _build_mapping_graph(
     mapping: dict[str, Any],
 ) -> tuple[
-    dict[str, dict[str, Any]],
-    dict[str, str | None],
-    dict[str, list[str]],
+    dict[str, dict[str, Any]], dict[str, str | None], dict[str, list[str]]
 ]:
     """Parse the message mapping into nodes, parent, and children dicts."""
     nodes: dict[str, dict[str, Any]] = {}
@@ -332,8 +506,7 @@ def _follow_main_path(
 
 
 def linearize_conversation(
-    convo: dict[str, Any],
-    include_system: bool,
+    convo: dict[str, Any], include_system: bool
 ) -> list[MessageRecord]:
     """Reconstruct a linear transcript from a ChatGPT conversation graph."""
     mapping = convo.get("mapping")
@@ -463,17 +636,60 @@ def process_memories(
 
 
 # -- input validation ---------------------------------------------------------
-def resolve_conversations_json(input_path: Path) -> tuple[Path, Path]:
-    """Locate conversations.json; return (file path, parent export directory)."""
-    if input_path.is_file() and input_path.name == "conversations.json":
-        return input_path, input_path.parent
+def resolve_conversations_files(input_path: Path) -> tuple[list[Path], Path]:
+    """
+    Locate conversation JSON file(s) and return (sorted list of paths, export dir).
+
+    Handles three cases in priority order:
+    1. A single file named conversations.json passed directly.
+    2. A directory containing conversations.json (legacy single-file export).
+    3. A directory containing conversations-NNN.json shards (split export).
+       Files must match the pattern conversations-NNN.json where NNN is digits.
+    """
+    if input_path.is_file():
+        if input_path.name == "conversations.json" or re.match(
+            r"conversations-\d+\.json", input_path.name
+        ):
+            return [input_path], input_path.parent
+        raise FileNotFoundError(
+            f"File does not look like a ChatGPT conversations file: {input_path}"
+        )
+
     if input_path.is_dir():
-        candidate = input_path / "conversations.json"
-        if candidate.exists():
-            return candidate, input_path
+        # Legacy: single conversations.json
+        single = input_path / "conversations.json"
+        if single.exists():
+            return [single], input_path
+
+        # New: split shards — conversations-000.json, conversations-001.json, …
+        shards = sorted(
+            input_path.glob("conversations-*.json"),
+            key=lambda p: p.name,
+        )
+        # Filter to only files that match the expected numeric-suffix pattern
+        shards = [
+            p for p in shards if re.match(r"conversations-\d+\.json$", p.name)
+        ]
+        if shards:
+            log.info(
+                "Found %d conversation shard(s): %s … %s",
+                len(shards),
+                shards[0].name,
+                shards[-1].name,
+            )
+            return shards, input_path
+
     raise FileNotFoundError(
-        f"Could not find conversations.json at: {input_path}"
+        "Could not find conversations.json or conversations-NNN.json "
+        f"shards at: {input_path}"
     )
+
+
+# kept for backwards compatibility with any external callers
+def resolve_conversations_json(input_path: Path) -> tuple[Path, Path]:
+    """Legacy single-file resolver — wraps resolve_conversations_files."""
+    paths, export_dir = resolve_conversations_files(input_path)
+    return paths[0], export_dir
 
 
 def validate_export_shape(data: Any) -> list[dict[str, Any]]:
@@ -488,44 +704,55 @@ def validate_export_shape(data: Any) -> list[dict[str, Any]]:
     return convos
 
 
-def iter_conversations(
-    conversations: list[dict[str, Any]],
-    limit: int | None,
-) -> Generator[tuple[int, dict[str, Any]], None, None]:
-    """Yield (1-based index, conversation) pairs, optionally limited to first N."""
-    items = conversations[:limit] if limit else conversations
-    yield from enumerate(items, start=1)
-
-
 # -- main sub-tasks -----------------------------------------------------------
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description=(
-            "Unpack a ChatGPT conversations.json into per-chat JSON/MD "
-            "plus aggregated outputs."
+            "Unpack a ChatGPT conversations.json (or split shards) into "
+            "per-chat JSON/MD plus aggregated outputs."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--stats",
-        action="store_true",
-        help="Print archive statistics after processing",
+        "--stats", action="store_true", help="Print archive statistics"
     )
     parser.add_argument(
         "--no-markdown",
         action="store_true",
-        help="Skip generating Markdown outputs (per-conversation and aggregated)",
+        help="Skip generating Markdown outputs",
+    )
+    parser.add_argument(
+        "--stream", action="store_true", help="Force streaming mode"
+    )
+    parser.add_argument(
+        "--prefer-ijson",
+        action="store_true",
+        help="Prefer ijson when streaming (falls back to stdlib streaming parser)",
+    )
+    parser.add_argument(
+        "--stream-threshold-mb",
+        type=int,
+        default=200,
+        metavar="MB",
+        help="Auto-enable streaming above this size (default: 200)",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Log progress every N conversations (default: 25)",
     )
     parser.add_argument(
         "--input",
         required=True,
-        help="Path to export folder or conversations.json",
+        help="Export folder or conversations.json / shard",
     )
     parser.add_argument(
         "--export-memories",
         action="store_true",
-        help="If memories.json exists in the export folder, export it too",
+        help="Export memories if present",
     )
     parser.add_argument("--output", required=True, help="Output directory")
     parser.add_argument(
@@ -534,38 +761,41 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Include system-role messages in Markdown",
     )
     parser.add_argument(
-        "--hash",
-        action="store_true",
-        help="Compute SHA256 hashes and include in manifest",
+        "--hash", action="store_true", help="Compute SHA256 hashes in manifest"
     )
     parser.add_argument(
         "--max-conversations",
         type=int,
         default=None,
         metavar="N",
-        help="Limit processing to first N conversations (useful for testing)",
+        help="Limit processing to first N conversations",
     )
     parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress output",
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Alias for --max-conversations",
     )
     parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
+        "--quiet", action="store_true", help="Suppress progress output"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     return parser
 
 
-def _init_big_md(path: Path, source: Path, now_utc: str, count: int) -> None:
+def _init_big_md(
+    path: Path, source_label: str, now_utc: str, count: int
+) -> None:
     """Write the header block of the aggregated Markdown file."""
     path.unlink(missing_ok=True)
     header = "\n".join(
         [
             "# ChatGPT Export Archive",
             "",
-            f"- Source: `{source}`",
+            f"- Source: `{source_label}`",
             f"- Generated (UTC): {now_utc}",
             f"- Conversations: {count}",
             "",
@@ -594,9 +824,7 @@ def _update_stats_for_conversation(
 
 
 def process_one_conversation(
-    idx: int,
-    convo: dict[str, Any],
-    ctx: ConversationContext,
+    idx: int, convo: dict[str, Any], ctx: ConversationContext
 ) -> dict[str, Any]:
     """Write JSON (and optional MD) for one conversation; return manifest entry."""
     title = convo.get("title") or "untitled"
@@ -660,47 +888,73 @@ def process_one_conversation(
     return entry
 
 
-def load_conversations_from_input(
+def should_stream(conv_json_paths: list[Path], scfg: StreamConfig) -> bool:
+    """Decide whether to stream based on combined size threshold or forced flag."""
+    if scfg.force_stream:
+        return True
+    # Multi-shard exports always stream to avoid loading all shards into RAM
+    if len(conv_json_paths) > 1:
+        return True
+    try:
+        return file_size_mb(conv_json_paths[0]) >= float(scfg.threshold_mb)
+    except OSError:
+        return False
+
+
+def load_conversations_source(
     input_path: Path,
-) -> tuple[Path, Path, list[dict[str, Any]]]:
-    """Resolve conversations.json and return (path, export_dir, conversations)."""
-    conv_json_path, export_dir = resolve_conversations_json(input_path)
-    raw_data = load_json_file(conv_json_path)
-    conversations = validate_export_shape(raw_data)
-    return conv_json_path, export_dir, conversations
+    scfg: StreamConfig,
+) -> tuple[list[Path], Path, bool, int | None, Iterable[dict[str, Any]]]:
+    """
+    Resolve conversation file(s) and return:
+    (conv_json_paths, export_dir, use_stream, total_count_or_none, iterable)
 
+    Handles both single conversations.json and multi-shard exports.
+    In non-stream mode (single small file), iterable is a list.
+    In stream mode, iterable is a generator; total_count is computed via a count pass.
+    """
+    conv_json_paths, export_dir = resolve_conversations_files(input_path)
 
-def write_big_outputs(
-    output_dir: Path,
-    conv_json_path: Path,
-    conversations: list[dict[str, Any]],
-    limit: int | None,
-    write_markdown: bool,
-) -> ArchiveBuildConfig:
-    """Write aggregated outputs and return config needed to build a manifest."""
-    total = len(conversations)
-    processed = min(limit, total) if limit else total
-
-    big_json_out = output_dir / "all_conversations.json"
-    atomic_write_json(
-        big_json_out, conversations[:limit] if limit else conversations
+    size_mb = total_size_mb(conv_json_paths)
+    log.info(
+        "Input: %d file(s), %.2f MB total (%s)",
+        len(conv_json_paths),
+        size_mb,
+        ", ".join(p.name for p in conv_json_paths),
     )
 
-    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    use_stream = should_stream(conv_json_paths, scfg)
 
-    big_md_out: Path | None = None
-    if write_markdown:
-        big_md_out = output_dir / "all_conversations.md"
-        _init_big_md(big_md_out, conv_json_path, now_utc, processed)
+    # Non-streaming path: only valid for a single small file
+    if not use_stream and len(conv_json_paths) == 1:
+        raw_data = load_json_file(conv_json_paths[0])
+        conversations = validate_export_shape(raw_data)
+        return (
+            conv_json_paths,
+            export_dir,
+            False,
+            len(conversations),
+            conversations,
+        )
 
-    return ArchiveBuildConfig(
-        conv_json_path=conv_json_path,
-        output_dir=output_dir,
-        now_utc=now_utc,
-        total_conversations=total,
-        processed_conversations=processed,
-        big_json_out=big_json_out,
-        big_md_out=big_md_out,
+    log.info("Streaming mode enabled.")
+
+    # Count total items across all shards (one fast pass each)
+    total_count = sum(count_json_array_items(p) for p in conv_json_paths)
+    log.info("Total conversations across all shards: %d", total_count)
+
+    use_ijson = scfg.prefer_ijson and ijson is not None
+    if scfg.prefer_ijson and ijson is None:
+        log.info(
+            "ijson not installed, falling back to stdlib streaming parser."
+        )
+
+    return (
+        conv_json_paths,
+        export_dir,
+        True,
+        total_count,
+        chain_json_files(conv_json_paths, use_ijson=use_ijson),
     )
 
 
@@ -715,7 +969,7 @@ def build_manifest_base(cfg: ArchiveBuildConfig) -> dict[str, Any]:
 
     return {
         "version": __version__,
-        "source": str(cfg.conv_json_path),
+        "sources": [str(p) for p in cfg.conv_json_paths],
         "generated_at_utc": cfg.now_utc,
         "conversation_count_total": cfg.total_conversations,
         "conversation_count_processed": cfg.processed_conversations,
@@ -725,9 +979,7 @@ def build_manifest_base(cfg: ArchiveBuildConfig) -> dict[str, Any]:
 
 
 def finalize_manifest(
-    manifest: dict[str, Any],
-    cfg: ArchiveBuildConfig,
-    do_hash: bool,
+    manifest: dict[str, Any], cfg: ArchiveBuildConfig, do_hash: bool
 ) -> Path:
     """Write manifest.json and return the path."""
     if do_hash:
@@ -743,24 +995,72 @@ def finalize_manifest(
     return manifest_out
 
 
-def process_all_conversations(
-    conversations: list[dict[str, Any]],
-    max_conversations: int | None,
-    ctx: ConversationContext,
+def write_big_outputs_header(
+    output_dir: Path,
+    source_label: str,
     processed_count: int,
+    write_markdown: bool,
+) -> tuple[str, Path, Path | None]:
+    """Initialize aggregated outputs and return (now_utc, big_json_out, big_md_out)."""
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    big_json_out = output_dir / "all_conversations.json"
+    big_md_out: Path | None = None
+
+    if write_markdown:
+        big_md_out = output_dir / "all_conversations.md"
+        _init_big_md(big_md_out, source_label, now_utc, processed_count)
+
+    return now_utc, big_json_out, big_md_out
+
+
+def process_conversations_iterable(
+    conversations_iter: Iterable[dict[str, Any]],
+    ctx: ConversationContext,
+    cfg: ArchiveBuildConfig,
+    scfg: StreamConfig,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Process conversations and return (manifest_entries, total_message_count)."""
+    """
+    Process conversations from an iterable (list or stream generator).
+    Also writes all_conversations.json as a streamed JSON array to avoid RAM blowups.
+    """
     entries: list[dict[str, Any]] = []
     total_messages = 0
 
-    for idx, convo in iter_conversations(conversations, max_conversations):
-        entry = process_one_conversation(idx, convo, ctx)
-        total_messages += entry["message_count"]
-        entries.append(entry)
+    big_json_out = cfg.big_json_out
+    big_json_out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = big_json_out.with_suffix(".json.tmp")
 
-        if idx % 25 == 0:
-            log.info("  Processed %d/%d...", idx, processed_count)
+    with tmp.open("w", encoding="utf-8") as out:
+        out.write("[\n")
+        first = True
 
+        for idx, convo in enumerate(conversations_iter, start=1):
+            if (
+                scfg.max_conversations is not None
+                and idx > scfg.max_conversations
+            ):
+                break
+            if not isinstance(convo, dict):
+                continue
+
+            if not first:
+                out.write(",\n")
+            out.write(json.dumps(convo, ensure_ascii=False, indent=2))
+            first = False
+
+            entry = process_one_conversation(idx, convo, ctx)
+            total_messages += entry["message_count"]
+            entries.append(entry)
+
+            if scfg.progress_every > 0 and idx % scfg.progress_every == 0:
+                log.info(
+                    "  Processed %d/%d...", idx, cfg.processed_conversations
+                )
+
+        out.write("\n]\n")
+
+    os.replace(tmp, big_json_out)
     return entries, total_messages
 
 
@@ -777,7 +1077,6 @@ def _print_summary(
         if memories_entry
         else ("skipped" if not export_memories else "no")
     )
-
     print(
         "\n Done"
         f"\n  Conversations : {process_count}"
@@ -821,6 +1120,15 @@ def main() -> int:
 
     args = _build_arg_parser().parse_args()
 
+    # Merge limit alias
+    max_conversations = args.max_conversations
+    if args.limit is not None:
+        max_conversations = (
+            args.limit
+            if max_conversations is None
+            else min(max_conversations, args.limit)
+        )
+
     logging.basicConfig(
         level=logging.WARNING if args.quiet else logging.INFO,
         format="%(message)s",
@@ -831,45 +1139,94 @@ def main() -> int:
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    write_markdown = not args.no_markdown
+    stats_obj = Stats() if args.stats else None
+
+    scfg = StreamConfig(
+        force_stream=args.stream,
+        prefer_ijson=args.prefer_ijson,
+        threshold_mb=args.stream_threshold_mb,
+        progress_every=args.progress_every,
+        max_conversations=max_conversations,
+    )
+
     try:
-        conv_json_path, export_dir, conversations = (
-            load_conversations_from_input(input_path)
+        (
+            conv_json_paths,
+            export_dir,
+            use_stream,
+            total_count,
+            conversations_iter,
+        ) = load_conversations_source(
+            input_path=input_path,
+            scfg=scfg,
         )
     except FileNotFoundError as exc:
         log.error("%s", exc)
         return 2
     except (json.JSONDecodeError, ValueError, OSError) as exc:
-        log.error("Failed to load conversations.json: %s", exc)
+        log.error("Failed to load conversations file(s): %s", exc)
         return 2
 
-    write_markdown = not args.no_markdown
-    cfg = write_big_outputs(
+    log.info("Streaming mode: %s", "on" if use_stream else "off")
+
+    total_conversations = int(total_count or 0)
+    processed_conversations = total_conversations
+    if max_conversations is not None:
+        processed_conversations = min(
+            processed_conversations, max_conversations
+        )
+
+    # Build a human-readable source label for logs and manifest header
+    if len(conv_json_paths) == 1:
+        source_label = str(conv_json_paths[0])
+    else:
+        source_label = (
+            f"{conv_json_paths[0].parent} "
+            f"({len(conv_json_paths)} shards: "
+            f"{conv_json_paths[0].name} … {conv_json_paths[-1].name})"
+        )
+
+    now_utc, big_json_out, big_md_out = write_big_outputs_header(
         output_dir=output_dir,
-        conv_json_path=conv_json_path,
-        conversations=conversations,
-        limit=args.max_conversations,
+        source_label=source_label,
+        processed_count=processed_conversations,
         write_markdown=write_markdown,
+    )
+
+    cfg = ArchiveBuildConfig(
+        conv_json_paths=conv_json_paths,
+        output_dir=output_dir,
+        now_utc=now_utc,
+        total_conversations=total_conversations,
+        processed_conversations=processed_conversations,
+        big_json_out=big_json_out,
+        big_md_out=big_md_out,
     )
     manifest = build_manifest_base(cfg)
 
-    stats_obj = Stats() if args.stats else None
-
     ctx = ConversationContext(
         convos_dir=output_dir / "conversations",
-        big_md_out=cfg.big_md_out,
+        big_md_out=big_md_out,
         used_folders=set(),
         include_system=args.include_system,
         do_hash=args.hash,
         write_markdown=write_markdown,
         stats=stats_obj,
     )
+    ctx.convos_dir.mkdir(parents=True, exist_ok=True)
 
-    entries, total_messages = process_all_conversations(
-        conversations=conversations,
-        max_conversations=args.max_conversations,
-        ctx=ctx,
-        processed_count=cfg.processed_conversations,
-    )
+    try:
+        entries, total_messages = process_conversations_iterable(
+            conversations_iter=conversations_iter,
+            ctx=ctx,
+            cfg=cfg,
+            scfg=scfg,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        log.error("Processing failed: %s", exc)
+        return 2
+
     manifest["conversations"] = entries
 
     memories_entry: dict[str, Any] | None = None
@@ -884,6 +1241,7 @@ def main() -> int:
             manifest["memories"] = memories_entry
 
     finalize_manifest(manifest, cfg, do_hash=args.hash)
+
     _print_summary(
         cfg.processed_conversations,
         total_messages,

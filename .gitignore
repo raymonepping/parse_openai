@@ -130,3 +130,7 @@ docker-compose.override.yml
 crash.log
 justfile
 
+
+# ChatGPT export inputs/outputs
+input/
+output/
