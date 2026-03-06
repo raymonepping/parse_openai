@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # pylint: disable=import-error,too-many-locals,too-many-branches,too-many-statements
+# Verification intentionally omitted for now.
+# Collection-level verification via N1QL caused Bandit noise,
+# and bucket-level stats are not exact for scope/collection counts.
 """
 import_openai.py
 
